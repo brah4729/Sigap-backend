@@ -12,9 +12,18 @@ This file:
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
+import logging
 
 from db.database import init_db
-from api.routes import disasters, agents, auth
+from api.routes import disasters, agents, auth, resources
+
+# Silence ADK's internal "Node execution failed" tracebacks.
+# These fire on every 503 retry attempt even though we already
+# catch and handle the error ourselves in monitor_agent.py /
+# assessment_agent.py. This is purely cosmetic noise reduction —
+# our own [AgentName] print statements still show what's happening.
+logging.getLogger("google_adk").setLevel(logging.CRITICAL)
+logging.getLogger("google.adk").setLevel(logging.CRITICAL)
 
 
 # --- Lifespan: runs on startup and shutdown ---
@@ -55,6 +64,7 @@ app.add_middleware(
 app.include_router(auth.router, prefix="/api/auth", tags=["Authentication"])
 app.include_router(disasters.router, prefix="/api/disasters", tags=["Disasters"])
 app.include_router(agents.router, prefix="/api/agents", tags=["Agents"])
+app.include_router(resources.router, prefix="/api/resources", tags=["Resources"])
 
 
 # --- Health Check ---

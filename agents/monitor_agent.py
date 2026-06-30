@@ -6,152 +6,93 @@ Responsibilities:
   - Deduplicate events (don't save the same quake twice)
   - Save new disasters to the database
   - Log every action for transparency
-  - Hand off to Assessment Agent when something significant is found
 
-Google ADK concepts used here:
-  - Agent: the AI brain that decides what to do
-  - Tool: a function the agent can call (our BMKG fetcher)
-  - Runner: executes the agent with a given input
+Google ADK 2.x notes:
+  - run_async() requires types.Content, NOT a plain string
+  - Never `break` out of run_async() — let it complete fully
+    or the generator gets cancelled and crashes
+  - event.content can be None for intermediate events (tool calls,
+    internal steps) — always guard with `if event.content`
 """
 
 import json
+
 import asyncio
-from datetime import datetime, timezone
 
 from google.adk.agents import Agent
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
-from google import genai
+from google.genai import types
+from google.genai.errors import ServerError, ClientError
 
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from db.models import Disaster, AgentLog, DisasterType, SeverityLevel, DisasterStatus
-from tools.bmkg_tool import (
-    fetch_latest_earthquakes,
-    fetch_latest_earthquake_single,
-    fetch_disaster_rss,
-    calculate_severity,
-)
+from tools.bmkg_tool import fetch_latest_earthquakes, fetch_disaster_rss
 from dotenv import load_dotenv
 import os
 
 load_dotenv()
 
-# --- ADK Client Setup ---
-# genai.Client connects to Google's AI services using your API key
-client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
-
-MODEL = "gemini-2.0-flash"  # Fast model — good for monitoring tasks
+MODEL = "gemini-3.1-flash-lite"  # Current stable model as of June 2026
 AGENT_NAME = "MonitorAgent"
 
 
-# --- ADK Tool Functions ---
-# These are the functions the AI agent can "call" during reasoning.
-# ADK agents work by deciding which tool to use, calling it,
-# reading the result, then deciding the next step — like a loop.
-
-async def tool_fetch_earthquakes() -> str:
-    """Fetch latest earthquake data from BMKG API."""
-    earthquakes = await fetch_latest_earthquakes()
-    if not earthquakes:
-        return json.dumps({"status": "no_data", "earthquakes": []})
-    return json.dumps({
-        "status": "ok",
-        "count": len(earthquakes),
-        "earthquakes": earthquakes[:5],  # limit to 5 for agent context
-    })
-
-
-async def tool_fetch_latest_single_quake() -> str:
-    """Fetch only the most recent significant earthquake from BMKG."""
-    quake = await fetch_latest_earthquake_single()
-    if not quake:
-        return json.dumps({"status": "no_data", "earthquake": None})
-    return json.dumps({"status": "ok", "earthquake": quake})
-
-
-async def tool_fetch_rss_alerts() -> str:
-    """Fetch international disaster alerts from GDACS RSS feed."""
-    alerts = await fetch_disaster_rss()
-    if not alerts:
-        return json.dumps({"status": "no_data", "alerts": []})
-    return json.dumps({
-        "status": "ok",
-        "count": len(alerts),
-        "alerts": alerts,
-    })
-
-
-# --- Core Monitor Logic ---
-
 async def run_monitor_agent(db: AsyncSession) -> dict:
     """
-    Main entry point — runs the Monitor Agent pipeline.
-
-    Flow:
-      1. Create ADK agent with our tools
-      2. Ask it to scan for disasters
-      3. Parse its response
-      4. Save new disasters to DB
-      5. Return summary
-
-    This is called by:
-      - POST /api/disasters/scan (manual trigger)
-      - Background scheduler (every 10 minutes in production)
+    Runs the full Monitor Agent pipeline:
+      1. Fetch raw data from BMKG + GDACS
+      2. ADK Agent analyzes and filters significant events
+      3. Save new disasters to DB with deduplication
     """
-
-    # Step 1: Fetch raw data directly (faster than going through agent for data fetch)
-    # We use the agent for ANALYSIS, not just data fetching
     print(f"[{AGENT_NAME}] Starting disaster scan...")
 
+    # Step 1: Fetch raw data
     earthquakes = await fetch_latest_earthquakes()
     rss_alerts = await fetch_disaster_rss()
-
     all_events = earthquakes + rss_alerts
+
     print(f"[{AGENT_NAME}] Found {len(all_events)} raw events from sources")
 
     if not all_events:
-        await _log_action(db, "scan_complete", "No events found from any source", None)
+        await _log_action(db, "scan_complete", "No events found", None)
+        await db.commit()
         return {"status": "ok", "new_disasters": 0, "message": "No new events found"}
 
-    # Step 2: Use ADK Agent to analyze which events are significant
+    # Step 2: Build the agent
     agent = Agent(
         name=AGENT_NAME,
         model=MODEL,
-        description="Disaster monitoring agent for Indonesia. Analyzes raw disaster data and identifies significant events requiring response.",
+        description="Disaster monitoring agent for Indonesia.",
         instruction="""
-        You are a disaster monitoring agent for Indonesia.
-        
-        You will receive raw disaster event data from BMKG and GDACS.
-        Your job is to:
-        1. Identify which events are SIGNIFICANT (magnitude >= 5.0 for earthquakes, or any flood/tsunami/volcano)
-        2. For each significant event, determine:
-           - severity: LOW, MEDIUM, HIGH, or CRITICAL
-           - whether it needs immediate response
-        3. Return a JSON list of significant events with this exact structure:
-        
-        {
-          "significant_events": [
-            {
-              "title": "event title",
-              "type": "EARTHQUAKE|FLOOD|TSUNAMI|VOLCANO|LANDSLIDE|OTHER",
-              "severity": "LOW|MEDIUM|HIGH|CRITICAL",
-              "location_name": "location",
-              "latitude": 0.0,
-              "longitude": 0.0,
-              "source": "BMKG|GDACS",
-              "description": "brief description of why this is significant",
-              "needs_immediate_response": true/false
-            }
-          ]
-        }
-        
-        Return ONLY the JSON. No markdown, no explanation.
-        """,
+You are a disaster monitoring agent for Indonesia.
+
+Analyze raw disaster event data from BMKG and GDACS.
+Identify SIGNIFICANT events:
+  - Earthquakes magnitude >= 5.0
+  - Any flood, tsunami, volcano, or landslide
+
+Return ONLY this JSON (no markdown, no explanation):
+{
+  "significant_events": [
+    {
+      "title": "string",
+      "type": "EARTHQUAKE|FLOOD|TSUNAMI|VOLCANO|LANDSLIDE|OTHER",
+      "severity": "LOW|MEDIUM|HIGH|CRITICAL",
+      "location_name": "string",
+      "latitude": 0.0,
+      "longitude": 0.0,
+      "source": "BMKG|GDACS",
+      "description": "string",
+      "needs_immediate_response": true
+    }
+  ]
+}
+""",
     )
 
-    # Prepare the input for the agent — summarize the raw events
+    # Step 3: Prepare message — ADK 2.x requires types.Content, not plain string
     events_summary = json.dumps({
         "earthquakes": [
             {
@@ -173,40 +114,110 @@ async def run_monitor_agent(db: AsyncSession) -> dict:
                 "source": a["source"],
             }
             for a in rss_alerts
-        ]
+        ],
     })
 
-    # Step 3: Run the agent
+    user_message = types.Content(
+        role="user",
+        parts=[types.Part(text=f"Analyze these disaster events:\n{events_summary}")],
+    )
+
+    # Step 4: Run agent — IMPORTANT rules for ADK 2.x async loop:
+    #
+    # Rule 1: Never use `break` — it cancels the generator mid-run and
+    #         causes "Root node cancelled" + OpenTelemetry context errors.
+    #
+    # Rule 2: event.content can be None for intermediate steps (tool calls,
+    #         internal reasoning steps). Always guard before accessing .parts
+    #
+    # Rule 3: Collect the LAST valid final response text, not the first.
+    #         The agent may emit multiple events before finishing.
+
     session_service = InMemorySessionService()
-    session = await session_service.create_session(
+    await session_service.create_session(
         app_name="sigap", user_id="system", session_id="monitor_scan"
     )
 
     runner = Runner(agent=agent, app_name="sigap", session_service=session_service)
 
-    agent_response = ""
-    async for event in runner.run_async(
-        user_id="system",
-        session_id="monitor_scan",
-        new_message=f"Analyze these disaster events and identify significant ones:\n{events_summary}",
-    ):
-        if event.is_final_response():
-            agent_response = event.content.parts[0].text
-            break
+    agent_response = ""  # will hold the last valid text from the agent
 
-    print(f"[{AGENT_NAME}] Agent response received")
+    # Retry loop — 503 means Google's servers are busy, not a code bug.
+    # We wait and retry up to 3 times with exponential backoff.
+    max_retries = 3
+    for attempt in range(1, max_retries + 1):
+        try:
+            print(f"[{AGENT_NAME}] Calling Gemini (attempt {attempt}/{max_retries})...")
 
-    # Step 4: Parse agent response and save to DB
+            # Let the generator run to FULL COMPLETION — no break!
+            async for event in runner.run_async(
+                user_id="system",
+                session_id="monitor_scan",
+                new_message=user_message,
+            ):
+                # Guard: event.content is None for non-text events
+                if event.is_final_response() and event.content and event.content.parts:
+                    agent_response = event.content.parts[0].text
+
+            break  # success — exit retry loop
+
+        except ServerError as e:
+            # 503 = Google's servers are overloaded, temporary issue
+            if attempt < max_retries:
+                wait = 2 ** attempt  # exponential backoff: 2s, 4s, 8s
+                print(f"[{AGENT_NAME}] 503 from Gemini, retrying in {wait}s... ({e})")
+                await asyncio.sleep(wait)
+                # Recreate session for next attempt
+                session_service = InMemorySessionService()
+                await session_service.create_session(
+                    app_name="sigap", user_id="system", session_id="monitor_scan"
+                )
+                runner = Runner(agent=agent, app_name="sigap", session_service=session_service)
+            else:
+                print(f"[{AGENT_NAME}] All {max_retries} attempts failed with 503")
+                await _log_action(db, "api_error", f"503 after {max_retries} retries: {str(e)[:200]}", None)
+                await db.commit()
+                return {
+                    "status": "error",
+                    "new_disasters": 0,
+                    "message": "Gemini API temporarily unavailable (503). Try again in a few minutes.",
+                }
+
+        except ClientError as e:
+            # 429 = quota exhausted — no point retrying
+            print(f"[{AGENT_NAME}] Quota exceeded (429): {e}")
+            await _log_action(db, "quota_error", str(e)[:200], None)
+            await db.commit()
+            return {
+                "status": "error",
+                "new_disasters": 0,
+                "message": "API quota exhausted. Get a new key at https://aistudio.google.com/apikey",
+            }
+
+    print(f"[{AGENT_NAME}] Agent finished. Response length: {len(agent_response)} chars")
+
+    # Step 5: Parse and save
     new_count = 0
+    if not agent_response:
+        print(f"[{AGENT_NAME}] Warning: empty agent response")
+        await _log_action(db, "empty_response", "Agent returned no content", None)
+        await db.commit()
+        return {"status": "warning", "new_disasters": 0, "message": "Agent returned empty response"}
+
     try:
-        # Strip any accidental markdown code fences
-        clean_response = agent_response.strip().strip("```json").strip("```").strip()
-        parsed = json.loads(clean_response)
+        # Strip markdown fences if present (``` json ... ```)
+        clean = agent_response.strip()
+        if clean.startswith("```"):
+            lines = clean.split("\n")
+            # Remove first line (```json) and last line (```)
+            clean = "\n".join(lines[1:-1]).strip()
+
+        parsed = json.loads(clean)
         significant_events = parsed.get("significant_events", [])
+        print(f"[{AGENT_NAME}] Agent found {len(significant_events)} significant events")
 
         for event in significant_events:
-            # Check if this disaster already exists (deduplication)
-            # We match on title + location to avoid duplicates
+            # Deduplication — skip if same title + location already exists
             existing = await db.execute(
                 select(Disaster).where(
                     Disaster.title == event["title"],
@@ -214,10 +225,10 @@ async def run_monitor_agent(db: AsyncSession) -> dict:
                 )
             )
             if existing.scalar_one_or_none():
-                print(f"[{AGENT_NAME}] Skipping duplicate: {event['title']}")
+                print(f"[{AGENT_NAME}] Duplicate skipped: {event['title']}")
                 continue
 
-            # Save new disaster to DB
+            # Save to DB
             disaster = Disaster(
                 title=event["title"],
                 description=event.get("description", ""),
@@ -228,27 +239,25 @@ async def run_monitor_agent(db: AsyncSession) -> dict:
                 latitude=event.get("latitude"),
                 longitude=event.get("longitude"),
                 source=event.get("source", "BMKG"),
-                ai_assessment=f"Detected by MonitorAgent. Needs immediate response: {event.get('needs_immediate_response', False)}",
+                ai_assessment=(
+                    f"Detected by MonitorAgent. "
+                    f"Needs immediate response: {event.get('needs_immediate_response', False)}"
+                ),
             )
             db.add(disaster)
-            await db.flush()  # flush to get the ID before commit
+            await db.flush()  # get ID before commit
 
-            # Log the action
-            await _log_action(
-                db,
-                "disaster_detected",
-                json.dumps(event),
-                disaster.id,
-            )
+            await _log_action(db, "disaster_detected", json.dumps(event), disaster.id)
             new_count += 1
-            print(f"[{AGENT_NAME}] Saved new disaster: {event['title']}")
+            print(f"[{AGENT_NAME}] Saved: {event['title']}")
 
         await db.commit()
 
     except json.JSONDecodeError as e:
-        print(f"[{AGENT_NAME}] Failed to parse agent response: {e}")
-        print(f"[{AGENT_NAME}] Raw response: {agent_response}")
-        await _log_action(db, "parse_error", f"Failed to parse: {agent_response[:200]}", None)
+        print(f"[{AGENT_NAME}] JSON parse error: {e}")
+        print(f"[{AGENT_NAME}] Raw response was: {agent_response[:300]}")
+        await _log_action(db, "parse_error", agent_response[:500], None)
+        await db.commit()
 
     result = {
         "status": "ok",
@@ -256,16 +265,15 @@ async def run_monitor_agent(db: AsyncSession) -> dict:
         "new_disasters": new_count,
         "message": f"Scan complete. {new_count} new disaster(s) saved.",
     }
-
     await _log_action(db, "scan_complete", json.dumps(result), None)
+    await db.commit()
+
     print(f"[{AGENT_NAME}] {result['message']}")
     return result
 
 
-# --- Helper ---
-
 async def _log_action(db: AsyncSession, action: str, details: str, disaster_id):
-    """Save an agent action to the audit log."""
+    """Write an agent action to the audit log. Caller handles commit."""
     log = AgentLog(
         agent_name=AGENT_NAME,
         action=action,
@@ -273,4 +281,3 @@ async def _log_action(db: AsyncSession, action: str, details: str, disaster_id):
         disaster_id=disaster_id,
     )
     db.add(log)
-    # Don't commit here — caller handles commit
