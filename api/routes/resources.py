@@ -50,7 +50,6 @@ async def list_resources(db: AsyncSession = Depends(get_db)):
         for r in resources
     ]
 
-
 @router.get("/deployments")
 async def list_deployments(db: AsyncSession = Depends(get_db)):
     """
