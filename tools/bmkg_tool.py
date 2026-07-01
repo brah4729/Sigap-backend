@@ -160,7 +160,7 @@ async def fetch_disaster_rss() -> list[dict]:
                 "severity": "MEDIUM",
             })
         return results
-    except Exception as e:
+    except Exception as e: 
         print(f"[BMKG Tool] GDACS RSS error: {e}")
         return []
 

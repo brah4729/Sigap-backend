@@ -32,7 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from db.models import Disaster, Resource, AgentLog
-from config import get_api_key, GEMINI_MODEL
+from config import get_api_key, use_api_key_for, GEMINI_MODEL
 from dotenv import load_dotenv
 import os
 
@@ -120,8 +120,7 @@ async def run_orchestrator_agent(db: AsyncSession) -> dict:
     print(f"[{AGENT_NAME}] Starting orchestration...")
 
     # Use orchestrator's specific API key
-    import google.genai as genai
-    genai.configure(api_key=get_api_key("orchestrator"))
+    use_api_key_for("orchestrator")
 
     # Step 1: Call MCP tools to gather data
     # (same data the MCP server exposes to external agents)

@@ -28,7 +28,7 @@ from sqlalchemy import select
 
 from db.models import Disaster, Resource, ResourceDeployment, AgentLog, DisasterStatus
 from tools.resource_tool import find_nearest_resources
-from config import get_api_key, GEMINI_MODEL
+from config import get_api_key, use_api_key_for, GEMINI_MODEL
 from dotenv import load_dotenv
 import os
 
@@ -45,8 +45,7 @@ async def run_coordinator_agent(db: AsyncSession, disaster_id: int = None) -> di
     print(f"[{AGENT_NAME}] Starting coordination run...")
 
     # Use coordinator's specific API key
-    import google.genai as genai
-    genai.configure(api_key=get_api_key("coordinator"))
+    use_api_key_for("coordinator")
 
     if disaster_id:
         query = select(Disaster).where(Disaster.id == disaster_id)

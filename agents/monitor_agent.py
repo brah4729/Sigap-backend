@@ -30,7 +30,7 @@ from sqlalchemy import select
 
 from db.models import Disaster, AgentLog, DisasterType, SeverityLevel, DisasterStatus
 from tools.bmkg_tool import fetch_latest_earthquakes, fetch_disaster_rss
-from config import get_api_key, GEMINI_MODEL
+from config import get_api_key, use_api_key_for, GEMINI_MODEL
 from dotenv import load_dotenv
 import os
 
@@ -52,8 +52,7 @@ async def run_monitor_agent(db: AsyncSession) -> dict:
     # Configure Gemini to use this agent's specific API key.
     # This way each agent has its own quota — Monitor won't
     # exhaust Assessment's quota and vice versa.
-    import google.genai as genai
-    genai.configure(api_key=get_api_key("monitor"))
+    use_api_key_for("monitor")
 
     # Step 1: Fetch raw data
     earthquakes = await fetch_latest_earthquakes()
