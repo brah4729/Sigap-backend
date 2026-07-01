@@ -9,6 +9,7 @@ This file:
 - Initializes the database on startup
 """
 
+import asyncio
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
@@ -35,8 +36,20 @@ async def lifespan(app: FastAPI):
     print("🚨 SIGAP starting up...")
     await init_db()
     print("✅ Database initialized")
+
+    # Start background schedulers as async tasks.
+    # asyncio.create_task() runs them concurrently alongside FastAPI
+    # without blocking the main server loop.
+    from scheduler import cleanup_loop, monitor_loop
+    cleanup_task = asyncio.create_task(cleanup_loop(interval_hours=2))
+    monitor_task = asyncio.create_task(monitor_loop(interval_minutes=10))
+    print("✅ Background schedulers started (cleanup: 2h, monitor: 10m)")
+
     yield
-    # SHUTDOWN
+
+    # SHUTDOWN — cancel background tasks cleanly
+    cleanup_task.cancel()
+    monitor_task.cancel()
     print("🛑 SIGAP shutting down...")
 
 

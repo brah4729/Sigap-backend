@@ -23,12 +23,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from db.models import Disaster, AgentLog, DisasterStatus, SeverityLevel
+from config import get_api_key, GEMINI_MODEL
 from dotenv import load_dotenv
 import os
 
 load_dotenv()
 
-MODEL = "gemini-2.5-flash-lite"
+MODEL = GEMINI_MODEL
 AGENT_NAME = "AssessmentAgent"
 
 
@@ -42,6 +43,10 @@ async def run_assessment_agent(db: AsyncSession, disaster_id: int = None) -> dic
     Returns a summary of what was assessed.
     """
     print(f"[{AGENT_NAME}] Starting assessment run...")
+
+    # Use this agent's specific API key
+    import google.genai as genai
+    genai.configure(api_key=get_api_key("assessment"))
 
     # Fetch disasters that need assessment
     if disaster_id:

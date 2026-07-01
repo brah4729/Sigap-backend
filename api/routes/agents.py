@@ -16,6 +16,16 @@ from db.models import AgentLog
 router = APIRouter()
 
 
+@router.get("/key-status")
+async def key_status():
+    """
+    Check which API keys are configured without exposing the actual key values.
+    Useful for debugging quota issues.
+    """
+    from config import get_all_key_status
+    return get_all_key_status()
+
+
 @router.get("/logs")
 async def get_agent_logs(
     db: AsyncSession = Depends(get_db),
@@ -40,6 +50,27 @@ async def get_agent_logs(
         }
         for log in logs
     ]
+
+
+@router.post("/cleanup")
+async def manual_cleanup(
+    db: AsyncSession = Depends(get_db),
+    older_than_hours: int = 3,
+):
+    """
+    Manually trigger data cleanup.
+    Deletes disasters older than `older_than_hours` (default: 3).
+    Then runs a fresh monitor scan to repopulate.
+    """
+    from scheduler import cleanup_old_data, run_fresh_scan
+    cleaned = await cleanup_old_data(older_than_hours=older_than_hours)
+    if cleaned > 0:
+        await run_fresh_scan()
+    return {
+        "status": "ok",
+        "cleaned": cleaned,
+        "message": f"Removed {cleaned} old disaster(s). Fresh scan triggered.",
+    }
 
 
 @router.post("/run/{agent_name}")
@@ -79,9 +110,9 @@ async def run_agent(
         result = await run_coordinator_agent(db, disaster_id=disaster_id)
         return result
 
-    # orchestrator comes next
-    return {
-        "status": "not_implemented",
-        "agent": agent_name,
-        "message": f"{agent_name.capitalize()} Agent is coming soon.",
-    }
+    if agent_name == "orchestrator":
+        from agents.orchestrator_agent import run_orchestrator_agent
+        result = await run_orchestrator_agent(db)
+        return result
+
+    return {"error": f"Unknown agent '{agent_name}'"}

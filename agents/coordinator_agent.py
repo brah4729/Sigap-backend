@@ -28,23 +28,25 @@ from sqlalchemy import select
 
 from db.models import Disaster, Resource, ResourceDeployment, AgentLog, DisasterStatus
 from tools.resource_tool import find_nearest_resources
+from config import get_api_key, GEMINI_MODEL
 from dotenv import load_dotenv
 import os
 
 load_dotenv()
 
-MODEL = "gemini-2.5-flash-lite"
+MODEL = GEMINI_MODEL
 AGENT_NAME = "CoordinatorAgent"
 
 
 async def run_coordinator_agent(db: AsyncSession, disaster_id: int = None) -> dict:
     """
     Run resource coordination on assessed disasters.
-
-    If disaster_id is given → coordinate only that one disaster.
-    If None → coordinate ALL disasters with status RESPONDING.
     """
     print(f"[{AGENT_NAME}] Starting coordination run...")
+
+    # Use coordinator's specific API key
+    import google.genai as genai
+    genai.configure(api_key=get_api_key("coordinator"))
 
     if disaster_id:
         query = select(Disaster).where(Disaster.id == disaster_id)
