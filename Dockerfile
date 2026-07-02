@@ -21,5 +21,7 @@ COPY . .
 EXPOSE 7860
 
 # Start the FastAPI server
-# 0.0.0.0 means "accept connections from anywhere" (required in Docker)
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "7860"]
+# Using 'python -m uvicorn' instead of just 'uvicorn'
+# because in Docker, Python module calls are always reliable
+# regardless of how PATH is configured in the container.
+CMD ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "7860"]
