@@ -74,6 +74,8 @@ app.add_middleware(
         "http://localhost:3000",
         "http://localhost:3001",
         FRONTEND_URL,
+        "https://*.vercel.app",
+        "https://*.hf.space",
     ],
     allow_credentials=True,
     allow_methods=["*"],
