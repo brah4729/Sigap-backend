@@ -1,0 +1,10 @@
+# railway.toml — Railway deployment configuration
+
+[build]
+builder = "nixpacks"       # Railway auto-detects Python and installs deps
+
+[deploy]
+startCommand = "uvicorn main:app --host 0.0.0.0 --port $PORT"
+healthcheckPath = "/"      # Railway pings this to verify the app is running
+healthcheckTimeout = 30    # seconds to wait for health check
+restartPolicyType = "on_failure"

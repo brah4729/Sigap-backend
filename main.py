@@ -10,6 +10,7 @@ This file:
 """
 
 import asyncio
+import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
@@ -62,11 +63,18 @@ app = FastAPI(
 )
 
 # --- CORS Middleware ---
-# Allows our Next.js frontend (running on port 3000) to call this API.
-# In production, replace "*" with your actual frontend URL.
+# Allows our Next.js frontend to call this API.
+# In production, FRONTEND_URL env var should be your Vercel URL.
+# e.g. FRONTEND_URL=https://sigap.vercel.app
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://localhost:3001"],
+    allow_origins=[
+        "http://localhost:3000",
+        "http://localhost:3001",
+        FRONTEND_URL,
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
