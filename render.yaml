@@ -1,0 +1,34 @@
+# render.yaml — Render deployment configuration
+# Render reads this file automatically when you connect your GitHub repo
+
+services:
+  - type: web
+    name: sigap-backend
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: GEMINI_MODEL
+        value: gemini-2.5-flash-lite
+      - key: JWT_ALGORITHM
+        value: HS256
+      - key: DATABASE_URL
+        value: sqlite+aiosqlite:///./sigap.db
+      # These must be set manually in Render dashboard (never commit real keys)
+      - key: GOOGLE_API_KEY
+        sync: false
+      - key: GOOGLE_API_KEY_MONITOR
+        sync: false
+      - key: GOOGLE_API_KEY_ASSESSMENT
+        sync: false
+      - key: GOOGLE_API_KEY_COORDINATOR
+        sync: false
+      - key: GOOGLE_API_KEY_ORCHESTRATOR
+        sync: false
+      - key: JWT_SECRET
+        sync: false
+      - key: FRONTEND_URL
+        sync: false
