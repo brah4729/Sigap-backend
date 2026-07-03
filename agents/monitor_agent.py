@@ -265,24 +265,15 @@ Return ONLY this JSON (no markdown, no explanation):
         await _log_action(db, "parse_error", agent_response[:500], None)
         await db.commit()
 
-    # ─── AUTOMATED PIPELINE ───────────────────────────────────────────
-    # This is the key feature — instead of waiting for a human to
-    # manually click "Assess" and "Coordinate", we trigger those agents
-    # automatically for every new disaster we just detected.
-    #
-    # Why does this matter?
-    # In disaster response, TIME IS LIVES. If a M6.8 earthquake hits
-    # at 3am, no human is watching the dashboard. This pipeline means
-    # the system immediately:
-    #   1. Detects the earthquake (MonitorAgent — just ran above)
-    #   2. Analyzes impact + recommends response (AssessmentAgent)
-    #   3. Deploys nearest resources automatically (CoordinatorAgent)
-    # All within minutes, with zero human intervention.
-    #
-    # We only run this if we actually found new disasters.
+    # --- AUTOMATED PIPELINE (background task) ---
+    # Fire-and-forget: we don't await this.
+    # The pipeline runs in the background while the HTTP response
+    # returns immediately to the frontend.
+    # The frontend's auto-refresh (every 30s) + delayed refreshes
+    # will pick up assessments and deployments as they complete.
     if new_count > 0:
-        print(f"[{AGENT_NAME}] 🔄 Triggering automated pipeline for {new_count} new disaster(s)...")
-        await _run_automated_pipeline(db)
+        print(f"[{AGENT_NAME}] 🔄 Starting background pipeline for {new_count} new disaster(s)...")
+        asyncio.create_task(_run_automated_pipeline(db))
 
     result = {
         "status": "ok",

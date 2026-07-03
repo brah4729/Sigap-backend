@@ -88,10 +88,22 @@ async def create_disaster(data: DisasterCreate, db: AsyncSession = Depends(get_d
 async def trigger_scan(db: AsyncSession = Depends(get_db)):
     """
     Trigger the Monitor Agent to scan BMKG + GDACS right now.
-    Wired to the real agent — this actually calls Gemini!
+
+    The scan itself runs synchronously (we wait for new disasters
+    to be saved). But the automated pipeline (assess + coordinate)
+    runs as a background task so this endpoint returns fast.
+
+    Why background task?
+    The full pipeline (15 disasters × Gemini calls) can take 2-5 minutes
+    on HuggingFace's free CPU. If we await it here, the frontend times out
+    at 30-120 seconds. Background task = instant response, dashboard
+    auto-refreshes to pick up deployments as they come in.
     """
-    # Import here to avoid circular imports at module load time
     from agents.monitor_agent import run_monitor_agent
-    
+    import asyncio
+
     result = await run_monitor_agent(db)
-    return result
+    return {
+        **result,
+        "pipeline": "running in background — dashboard will auto-refresh",
+    }
