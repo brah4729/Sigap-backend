@@ -313,66 +313,57 @@ async def _run_automated_pipeline(db: AsyncSession):
     Automatically runs AssessmentAgent then CoordinatorAgent
     right after MonitorAgent detects new disasters.
 
-    This is the core of SIGAP's value proposition:
-    Zero human intervention needed between detection and response.
+    WHY FRESH SESSIONS?
+    We create a NEW database session for each sub-agent instead of
+    passing the monitor's session down. This is because SQLAlchemy
+    async sessions track their own transaction state. When you reuse
+    the same session across multiple agents that each commit/flush,
+    the session can get into a confused state — changes from one agent
+    aren't visible to the next because they're in different
+    transaction scopes.
 
-    Flow:
-      MonitorAgent saves DETECTED disasters
-              ↓
-      AssessmentAgent analyzes ALL pending DETECTED disasters
-      (no 5-disaster limit here — process everything)
-              ↓
-      Small pause to avoid Gemini rate limits
-              ↓
-      CoordinatorAgent deploys resources to RESPONDING disasters
-
-    Error handling:
-      If assessment fails — we still try coordination (some may
-      have been assessed in a previous run).
-      If coordination fails — disasters stay as RESPONDING so
-      a human can manually coordinate from the dashboard.
+    Fresh session per agent = clean slate, no cross-contamination.
     """
-    print(f"[{AGENT_NAME}] Pipeline step 1/2: Running AssessmentAgent...")
+    from db.database import AsyncSessionLocal
 
+    print(f"[{AGENT_NAME}] Pipeline step 1/2: Running AssessmentAgent...")
     try:
         from agents.assessment_agent import run_assessment_agent
-
-        # Remove the 5-disaster batch limit for automated runs
-        # We want to assess EVERY new disaster, not just the first 5
-        from sqlalchemy import select
         from db.models import DisasterStatus
 
-        pending = await db.execute(
-            select(Disaster).where(Disaster.status == DisasterStatus.DETECTED)
-        )
-        pending_disasters = pending.scalars().all()
-        print(f"[{AGENT_NAME}] Found {len(pending_disasters)} disaster(s) to assess")
+        # Find all pending disasters using a FRESH session
+        async with AsyncSessionLocal() as assessment_db:
+            pending = await assessment_db.execute(
+                select(Disaster).where(Disaster.status == DisasterStatus.DETECTED)
+            )
+            pending_disasters = pending.scalars().all()
+            pending_ids = [d.id for d in pending_disasters]
 
-        # Assess each one individually so a single failure
-        # doesn’t block all the others
+        print(f"[{AGENT_NAME}] Found {len(pending_ids)} disaster(s) to assess")
+
+        # Assess each one with its own fresh session
         assessed = 0
-        for disaster in pending_disasters:
-            result = await run_assessment_agent(db, disaster_id=disaster.id)
-            if result.get("assessed", 0) > 0:
-                assessed += 1
-            # Small pause between API calls to respect rate limits
-            await asyncio.sleep(2)
+        for disaster_id in pending_ids:
+            async with AsyncSessionLocal() as agent_db:
+                result = await run_assessment_agent(agent_db, disaster_id=disaster_id)
+                if result.get("assessed", 0) > 0:
+                    assessed += 1
+            await asyncio.sleep(2)  # respect Gemini rate limits
 
-        print(f"[{AGENT_NAME}] Pipeline: {assessed}/{len(pending_disasters)} disasters assessed")
+        print(f"[{AGENT_NAME}] Pipeline: {assessed}/{len(pending_ids)} disasters assessed")
 
     except Exception as e:
         print(f"[{AGENT_NAME}] Assessment pipeline error: {e}")
-        # Don’t raise — try coordination anyway with whatever was assessed
 
-    # Brief pause between assessment and coordination
     await asyncio.sleep(3)
 
     print(f"[{AGENT_NAME}] Pipeline step 2/2: Running CoordinatorAgent...")
-
     try:
         from agents.coordinator_agent import run_coordinator_agent
-        result = await run_coordinator_agent(db)
-        print(f"[{AGENT_NAME}] Pipeline: {result.get('message', 'Coordination done')}")
+        # Fresh session for coordinator too
+        async with AsyncSessionLocal() as coord_db:
+            result = await run_coordinator_agent(coord_db)
+            print(f"[{AGENT_NAME}] Pipeline: {result.get('message', 'Coordination done')}")
 
     except Exception as e:
         print(f"[{AGENT_NAME}] Coordination pipeline error: {e}")
