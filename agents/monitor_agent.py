@@ -265,6 +265,25 @@ Return ONLY this JSON (no markdown, no explanation):
         await _log_action(db, "parse_error", agent_response[:500], None)
         await db.commit()
 
+    # ─── AUTOMATED PIPELINE ───────────────────────────────────────────
+    # This is the key feature — instead of waiting for a human to
+    # manually click "Assess" and "Coordinate", we trigger those agents
+    # automatically for every new disaster we just detected.
+    #
+    # Why does this matter?
+    # In disaster response, TIME IS LIVES. If a M6.8 earthquake hits
+    # at 3am, no human is watching the dashboard. This pipeline means
+    # the system immediately:
+    #   1. Detects the earthquake (MonitorAgent — just ran above)
+    #   2. Analyzes impact + recommends response (AssessmentAgent)
+    #   3. Deploys nearest resources automatically (CoordinatorAgent)
+    # All within minutes, with zero human intervention.
+    #
+    # We only run this if we actually found new disasters.
+    if new_count > 0:
+        print(f"[{AGENT_NAME}] 🔄 Triggering automated pipeline for {new_count} new disaster(s)...")
+        await _run_automated_pipeline(db)
+
     result = {
         "status": "ok",
         "scanned_events": len(all_events),
@@ -287,3 +306,75 @@ async def _log_action(db: AsyncSession, action: str, details: str, disaster_id):
         disaster_id=disaster_id,
     )
     db.add(log)
+
+
+async def _run_automated_pipeline(db: AsyncSession):
+    """
+    Automatically runs AssessmentAgent then CoordinatorAgent
+    right after MonitorAgent detects new disasters.
+
+    This is the core of SIGAP's value proposition:
+    Zero human intervention needed between detection and response.
+
+    Flow:
+      MonitorAgent saves DETECTED disasters
+              ↓
+      AssessmentAgent analyzes ALL pending DETECTED disasters
+      (no 5-disaster limit here — process everything)
+              ↓
+      Small pause to avoid Gemini rate limits
+              ↓
+      CoordinatorAgent deploys resources to RESPONDING disasters
+
+    Error handling:
+      If assessment fails — we still try coordination (some may
+      have been assessed in a previous run).
+      If coordination fails — disasters stay as RESPONDING so
+      a human can manually coordinate from the dashboard.
+    """
+    print(f"[{AGENT_NAME}] Pipeline step 1/2: Running AssessmentAgent...")
+
+    try:
+        from agents.assessment_agent import run_assessment_agent
+
+        # Remove the 5-disaster batch limit for automated runs
+        # We want to assess EVERY new disaster, not just the first 5
+        from sqlalchemy import select
+        from db.models import DisasterStatus
+
+        pending = await db.execute(
+            select(Disaster).where(Disaster.status == DisasterStatus.DETECTED)
+        )
+        pending_disasters = pending.scalars().all()
+        print(f"[{AGENT_NAME}] Found {len(pending_disasters)} disaster(s) to assess")
+
+        # Assess each one individually so a single failure
+        # doesn’t block all the others
+        assessed = 0
+        for disaster in pending_disasters:
+            result = await run_assessment_agent(db, disaster_id=disaster.id)
+            if result.get("assessed", 0) > 0:
+                assessed += 1
+            # Small pause between API calls to respect rate limits
+            await asyncio.sleep(2)
+
+        print(f"[{AGENT_NAME}] Pipeline: {assessed}/{len(pending_disasters)} disasters assessed")
+
+    except Exception as e:
+        print(f"[{AGENT_NAME}] Assessment pipeline error: {e}")
+        # Don’t raise — try coordination anyway with whatever was assessed
+
+    # Brief pause between assessment and coordination
+    await asyncio.sleep(3)
+
+    print(f"[{AGENT_NAME}] Pipeline step 2/2: Running CoordinatorAgent...")
+
+    try:
+        from agents.coordinator_agent import run_coordinator_agent
+        result = await run_coordinator_agent(db)
+        print(f"[{AGENT_NAME}] Pipeline: {result.get('message', 'Coordination done')}")
+
+    except Exception as e:
+        print(f"[{AGENT_NAME}] Coordination pipeline error: {e}")
+
+    print(f"[{AGENT_NAME}] ✅ Automated pipeline complete")
