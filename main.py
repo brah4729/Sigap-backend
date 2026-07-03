@@ -38,9 +38,22 @@ async def lifespan(app: FastAPI):
     await init_db()
     print("✅ Database initialized")
 
-    # Start background schedulers as async tasks.
-    # asyncio.create_task() runs them concurrently alongside FastAPI
-    # without blocking the main server loop.
+    # Auto-seed resources on every startup.
+    # Why? HuggingFace free tier containers restart often.
+    # Without this, after every restart someone has to manually
+    # call POST /api/resources/seed before the system works.
+    # seed_resources() is idempotent — safe to call multiple times,
+    # it skips seeding if resources already exist.
+    from db.database import AsyncSessionLocal
+    from tools.resource_tool import seed_resources
+    async with AsyncSessionLocal() as db:
+        seeded = await seed_resources(db)
+        if seeded > 0:
+            print(f"✅ Auto-seeded {seeded} resources")
+        else:
+            print("✅ Resources already seeded, skipping")
+
+    # Start background schedulers
     from scheduler import cleanup_loop, monitor_loop
     cleanup_task = asyncio.create_task(cleanup_loop(interval_hours=2))
     monitor_task = asyncio.create_task(monitor_loop(interval_minutes=10))
